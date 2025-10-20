@@ -10,3 +10,7 @@ This microservice was built and run utilizing Confluent Cloud, Confluent Kafka, 
 ![Architecture](docs/KafkaMicroservice.drawio.svg)
 
 
+
+
+All rights reserved. Permission is granted to view the contents of this repository.
+No permission is granted to use, copy, modify, or redistribute any portion.
