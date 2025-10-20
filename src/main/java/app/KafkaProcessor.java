@@ -1,9 +1,16 @@
 package app;
 
+
+import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
+import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.*;
+
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.producer.*;
 import org.apache.avro.generic.GenericRecord;
 
+import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.Arrays;
 import java.time.Duration;
@@ -34,6 +41,8 @@ public class KafkaProcessor{
     private LinkedHashMap<Integer, PlayerStats> map;
     private int lrumax = 10000;
     private int maxPPS = 2;
+    private KafkaProducer<String, GenericRecord> producer;
+    private Schema schema; 
     public static void main(String[] args){
        new KafkaProcessor(); 
     }
@@ -46,7 +55,9 @@ public class KafkaProcessor{
         p.setProperty("group.id", "Processors3");
         p.setProperty("auto.offset.reset", "latest");
         p.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        p.setProperty("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
         p.setProperty("value.deserializer", "io.confluent.kafka.serializers.KafkaAvroDeserializer");
+        p.setProperty("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
         p.setProperty("security.protocol", "SASL_SSL");
         p.setProperty("sasl.mechanism", "PLAIN");
         //https://docs.confluent.io/platform/current/schema-registry/sr-client-configs.html#basic-auth-credentials-source
@@ -59,6 +70,11 @@ public class KafkaProcessor{
         p.setProperty("basic.auth.credentials.source", "USER_INFO");
         p.setProperty("basic.auth.user.info", System.getenv("SR_USER") + ":" + System.getenv("SR_PASSWORD"));
         p.setProperty("specific.avro.reader", "false"); // genericrecord
+        //producer specific
+        p.setProperty("acks", "all");
+        
+        this.schema = getSchema("PPS_reports");
+        this.producer = new KafkaProducer<>(p);
 
         try(KafkaConsumer<String, GenericRecord> consumer = new KafkaConsumer<>(p)){
             consumer.subscribe(Arrays.asList("gaming_activity"));
@@ -71,6 +87,12 @@ public class KafkaProcessor{
             }
         }
     }
+    private Schema getSchema(String topicname){
+        SchemaRegistryClient sr = new CachedSchemaRegistryClient(System.getenv("SR_URL"), 128, Map.of("basic.auth.credentials.source", "USER_INFO", "basic.auth.user.info", System.getenv("SR_USER") + ":" + System.getenv("SR_PASSWORD")));
+        topicname+="-value";
+        try{return new Schema.Parser().parse(sr.getLatestSchemaMetadata(topicname).getSchema());}
+        catch(Exception e){e.printStackTrace(); throw new IllegalStateException("Failed to load schema" + e);}
+    }
     private void recordHandler(ConsumerRecord<String, GenericRecord> record){
         PlayerStats playerStats = map.get(Integer.valueOf(record.key()));
             int points = (Integer) record.value().get("points");
@@ -81,6 +103,19 @@ public class KafkaProcessor{
             if(playerPPS>this.maxPPS){
                 //HANDLE ON REPORT TOPIC
                 System.out.printf("User: %s is exceeding the max Points Per Second at %s, This instance has been logged", record.key(), playerPPS);
+                GenericRecord value = new GenericData.Record(this.schema);
+                value.put("pps", playerPPS);
+                value.put("player_id", Integer.valueOf(record.key()));
+                value.put("time", now.getEpochSecond());
+                ProducerRecord<String, GenericRecord> producerRecord = new ProducerRecord<>("PPS_reports", record.key(), value);
+                this.producer.send(producerRecord, (meta, e) -> {
+                    if(e!=null) {
+                        e.printStackTrace();
+                    } else{
+                        System.out.printf("Published to %s partition %s and offset %s", meta.topic(), meta.partition(), meta.offset());
+                    }
+
+                });
             }else{
                 System.out.printf("User exists at %f PPS", playerPPS);
             }
