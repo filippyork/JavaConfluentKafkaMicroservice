@@ -11,6 +11,7 @@ import org.apache.kafka.clients.producer.*;
 import org.apache.avro.generic.GenericRecord;
 
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.LinkedHashMap;
 import java.util.Arrays;
 import java.time.Duration;
@@ -18,6 +19,17 @@ import java.util.Properties;
 import java.time.Instant;
 import java.time.Duration;
 public class KafkaProcessor{
+    private class LRUcache<K,V> extends LinkedHashMap<K,V>{
+        private int capacity;
+        public LRUcache(int buckets){
+                super(buckets, 0.75f, true);
+                this.capacity = buckets;
+            }
+        @Override
+        protected boolean removeEldestEntry(Entry<K,V> eldest){
+            return this.size() > this.capacity;
+        }    
+    }
     private class PlayerStats{
         public int points; 
         public Instant time;
@@ -38,9 +50,9 @@ public class KafkaProcessor{
             }
         }
     }
-    private LinkedHashMap<Integer, PlayerStats> map;
     private int lrumax = 10000;
-    private int maxPPS = 2;
+    private LRUcache<Integer, PlayerStats> map = new LRUcache(lrumax);
+    private int maxPPS = 5;
     private KafkaProducer<String, GenericRecord> producer;
     private Schema schema; 
     public static void main(String[] args){
@@ -48,7 +60,6 @@ public class KafkaProcessor{
     }
     public KafkaProcessor(){
         
-        this.map = new LinkedHashMap<Integer, PlayerStats>(16, 0.75f, true); //LRU STYLE
         Properties p = new Properties();
         //https://kafka.apache.org/20/generate  d/consumer_config.html
         p.setProperty("bootstrap.servers", System.getenv("BOOTSTRAP_SERVERS"));
@@ -96,7 +107,7 @@ public class KafkaProcessor{
     private void recordHandler(ConsumerRecord<String, GenericRecord> record){
         PlayerStats playerStats = map.get(Integer.valueOf(record.key()));
             int points = (Integer) record.value().get("points");
-            Instant now = Instant.now();
+            Instant now = Instant.ofEpochMilli(record.timestamp());
         if(playerStats!=null){
             float playerPPS = playerStats.pointsPerSecond(points, now);
             playerStats.setPoints(points, now);
@@ -112,7 +123,7 @@ public class KafkaProcessor{
                     if(e!=null) {
                         e.printStackTrace();
                     } else{
-                        System.out.printf("Published to %s partition %s and offset %s", meta.topic(), meta.partition(), meta.offset());
+                        System.out.printf("Published to %s partition %s and offset %s%n", meta.topic(), meta.partition(), meta.offset());
                     }
 
                 });
@@ -122,10 +133,6 @@ public class KafkaProcessor{
             
         }else{
             map.put((Integer.valueOf(record.key())), new PlayerStats(points, now));
-            if(map.size()>lrumax){
-                // POP LAST IF EXCEEDING LRU LIMIT
-            }
-
         } 
          
     }
