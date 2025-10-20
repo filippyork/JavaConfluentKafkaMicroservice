@@ -13,7 +13,7 @@ public class KafkaProcessor{
         Properties p = new Properties();
         p.setProperty("bootstrap.servers", System.getenv("BOOTSTRAP_SERVERS"));
         p.setProperty("group.id", "Processors1");
-        p.setProperty("key.deserializer", "io.confluent.kafka.serializers.KafkaAvroDeserializer");
+        p.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
         p.setProperty("value.deserializer", "io.confluent.kafka.serializers.KafkaAvroDeserializer");
         p.setProperty("security.protocol", "SASL_SSL");
         p.setProperty("sasl.mechanism", "PLAIN");
