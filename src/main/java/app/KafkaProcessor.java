@@ -5,9 +5,16 @@ import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.*;
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.serialization.Serde;
+import io.confluent.kafka.streams.serdes.avro.GenericAvroSerde;
+import org.apache.kafka.streams.kstream.*;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.processor.api.Record; 
 
-import org.apache.kafka.clients.consumer.*;
-import org.apache.kafka.clients.producer.*;
 import org.apache.avro.generic.GenericRecord;
 
 import java.util.Map;
@@ -53,22 +60,20 @@ public class KafkaProcessor{
     private int lrumax = 10000;
     private LRUcache<Integer, PlayerStats> map = new LRUcache(lrumax);
     private int maxPPS = 5;
-    private KafkaProducer<String, GenericRecord> producer;
     private Schema schema; 
+    private final Serde<String> keySerde = Serdes.String(); //SERializer and DEserializer SERDE
+    private final Serde<GenericRecord> valueSerde = new GenericAvroSerde();
     public static void main(String[] args){
        new KafkaProcessor(); 
     }
     public KafkaProcessor(){
-        
+       
         Properties p = new Properties();
         //https://kafka.apache.org/20/generate  d/consumer_config.html
         p.setProperty("bootstrap.servers", System.getenv("BOOTSTRAP_SERVERS"));
-        p.setProperty("group.id", "Processors3");
+        p.setProperty("application.id", "StreamProcessors1");
         p.setProperty("auto.offset.reset", "latest");
-        p.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
-        p.setProperty("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        p.setProperty("value.deserializer", "io.confluent.kafka.serializers.KafkaAvroDeserializer");
-        p.setProperty("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
+        
         p.setProperty("security.protocol", "SASL_SSL");
         p.setProperty("sasl.mechanism", "PLAIN");
         //https://docs.confluent.io/platform/current/schema-registry/sr-client-configs.html#basic-auth-credentials-source
@@ -80,23 +85,31 @@ public class KafkaProcessor{
         p.setProperty("schema.registry.url", System.getenv("SR_URL"));
         p.setProperty("basic.auth.credentials.source", "USER_INFO");
         p.setProperty("basic.auth.user.info", System.getenv("SR_USER") + ":" + System.getenv("SR_PASSWORD"));
-        p.setProperty("specific.avro.reader", "false"); // genericrecord
-        //producer specific
-        p.setProperty("acks", "all");
         
-        this.schema = getSchema("PPS_reports");
-        this.producer = new KafkaProducer<>(p);
+                
+        Map<String, Object> config = Map.of(
+    "schema.registry.url", System.getenv("SR_URL"),
+    "basic.auth.credentials.source", "USER_INFO",
+    "basic.auth.user.info", System.getenv("SR_USER")+":"+System.getenv("SR_PASSWORD")
+); 
+        valueSerde.configure(config, false); 
+        this.schema = getSchema("PPS_reports"); 
 
-        try(KafkaConsumer<String, GenericRecord> consumer = new KafkaConsumer<>(p)){
-            consumer.subscribe(Arrays.asList("gaming_activity"));
-            while(true){
-                final ConsumerRecords<String, GenericRecord> consumerRecords = consumer.poll(Duration.ofSeconds(1));
-                for(ConsumerRecord<String, GenericRecord> record : consumerRecords){
-                    System.out.printf("%s, %s\n", record.key(), record.value());
-                    recordHandler(record);
-                }
-            }
+        StreamsBuilder builder = new StreamsBuilder();
+        KStream<String, GenericRecord> stream = builder.stream("gaming_activity", Consumed.with(keySerde, valueSerde));
+        stream.process(() -> new Processor<String, GenericRecord, String, GenericRecord>(){
+            private ProcessorContext<String, GenericRecord> ctx;
+            @Override public void init(ProcessorContext<String, GenericRecord> context){
+                this.ctx = context; // hold context for later forwarding
         }
+            @Override public void process(Record<String, GenericRecord> record){
+                GenericRecord newval = recordHandler(record);
+                if(newval!=null)this.ctx.forward(record.withValue(newval));
+            }
+
+        }).to("PPS_reports", Produced.with(keySerde, valueSerde)); 
+        KafkaStreams ks = new KafkaStreams(builder.build(), p);
+        ks.start();
     }
     private Schema getSchema(String topicname){
         SchemaRegistryClient sr = new CachedSchemaRegistryClient(System.getenv("SR_URL"), 128, Map.of("basic.auth.credentials.source", "USER_INFO", "basic.auth.user.info", System.getenv("SR_USER") + ":" + System.getenv("SR_PASSWORD")));
@@ -104,7 +117,7 @@ public class KafkaProcessor{
         try{return new Schema.Parser().parse(sr.getLatestSchemaMetadata(topicname).getSchema());}
         catch(Exception e){e.printStackTrace(); throw new IllegalStateException("Failed to load schema" + e);}
     }
-    private void recordHandler(ConsumerRecord<String, GenericRecord> record){
+    private GenericRecord recordHandler(Record<String, GenericRecord> record){
         PlayerStats playerStats = map.get(Integer.valueOf(record.key()));
             int points = (Integer) record.value().get("points");
             Instant now = Instant.ofEpochMilli(record.timestamp());
@@ -118,22 +131,16 @@ public class KafkaProcessor{
                 value.put("pps", playerPPS);
                 value.put("player_id", Integer.valueOf(record.key()));
                 value.put("time", now.getEpochSecond());
-                ProducerRecord<String, GenericRecord> producerRecord = new ProducerRecord<>("PPS_reports", record.key(), value);
-                this.producer.send(producerRecord, (meta, e) -> {
-                    if(e!=null) {
-                        e.printStackTrace();
-                    } else{
-                        System.out.printf("Published to %s partition %s and offset %s%n", meta.topic(), meta.partition(), meta.offset());
-                    }
-
-                });
-            }else{
+                return value;
+                }
+             else{
                 System.out.printf("User exists at %f PPS", playerPPS);
             }
             
         }else{
             map.put((Integer.valueOf(record.key())), new PlayerStats(points, now));
         } 
+        return null;
          
     }
 }
