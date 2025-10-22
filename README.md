@@ -5,9 +5,9 @@ This tiny microservice ingests generated gaming player activity -> determines PP
 
 This microservice was built and run utilizing Confluent Cloud, Confluent Kafka, Java, Gradle, and Avro Schemas.
 
-## System Diagram
+## System Diagram (with KafkaServices)
 
-![Architecture](docs/KafkaMicroservice.drawio.svg)
+![Architecture](docs/KafkaServiceMicroservice.drawio.svg)
 
 
 All rights reserved. Permission is granted to view the contents of this repository. No permission is granted to use, copy, modify, or redistribute any portion.
